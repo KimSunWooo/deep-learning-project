@@ -1,0 +1,2 @@
+websockets>=14,<17
+opencv-python-headless>=4.8
