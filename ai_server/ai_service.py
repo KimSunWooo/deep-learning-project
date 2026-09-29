@@ -1,58 +1,51 @@
-"""One GPU inference owner; camera-specific temporal state."""
+"""WebSocket video ingress with the unchanged main-version model outputs."""
+import json
 import logging
 import time
-import json
-from .ai_networkmanager import AINetworkManager
-from .ai_manager import AIManager
-from .yolo_pose import YOLOPoseWrapper
+
 from config.settings import CAMERA_IDS
+from .ai_manager import AIManager
+from .ai_networkmanager import AINetworkManager
+
+LOG = logging.getLogger(__name__)
 
 
 class AIService:
     def __init__(self, device='cuda'):
-        self.net = AINetworkManager()
         self.device = device
-        self.logger = logging.getLogger(__name__)
+        self.net = AINetworkManager()
         self.running = False
 
     def run(self):
         managers = {camera_id: AIManager(camera_id, self.device) for camera_id in CAMERA_IDS}
-        pose = YOLOPoseWrapper(self.device)
         self.net.start()
         self.running = True
         try:
             while self.running:
-                start = time.monotonic()
-                items = self.net.take_latest()
-                fresh = []
-                for camera_id, payload in items.items():
-                    frame_id, capture_time, mode, frame = payload
+                started = time.monotonic()
+                for camera_id, (frame_id, capture_time, mode, frame) in self.net.take_latest().items():
                     if time.time() - capture_time > 0.5:
-                        pose.reset(camera_id)
                         managers[camera_id] = AIManager(camera_id, self.device)
                         continue
-                    fresh.append((camera_id, frame_id, mode, frame))
-                if fresh:
                     try:
-                        poses = pose.detect_batch([(cam, frame) for cam, _, _, frame in fresh])
-                        for (camera_id, frame_id, mode, frame), keypoints in zip(fresh, poses):
-                            manager = managers[camera_id]
-                            if manager.current_mode != mode:
-                                managers[camera_id] = manager = AIManager(camera_id, self.device)
-                                pose.reset(camera_id)
-                            manager.set_mode(mode)
-                            result = json.loads(manager.process_frame(frame, keypoints, frame_id))
-                            result['skeletons'] = [
-                                {'track_id': int(track_id), 'keypoints': points.tolist()}
-                                for track_id, points in keypoints.items()
-                            ]
-                            self.net.send_to_main(json.dumps(result, ensure_ascii=False))
+                        manager = managers[camera_id]
+                        if manager.current_mode != mode:
+                            managers[camera_id] = manager = AIManager(camera_id, self.device)
+                        manager.set_mode(mode)
+                        # Main-version AIManager and RawDetection retain their outputs.
+                        result = json.loads(manager.process_frame(frame))
+                        pose = manager.yolo_pose.last_result
+                        # Transport metadata only: retain frame_idx, detections, raw_data as-is.
+                        result['frame_id'] = frame_id
+                        result['skeletons'] = [
+                            {'track_id': int(track_id), 'keypoints': points.tolist()}
+                            for track_id, points in pose['keypoints'].items()
+                        ]
+                        self.net.send_to_main(json.dumps(result, ensure_ascii=False))
                     except Exception:
-                        self.logger.exception('Inference batch failed; resetting temporal state')
-                        for camera_id, *_ in fresh:
-                            pose.reset(camera_id)
-                            managers[camera_id] = AIManager(camera_id, self.device)
-                time.sleep(max(0, 1 / 15 - (time.monotonic() - start)))
+                        LOG.exception('Inference failed for %s', camera_id)
+                        managers[camera_id] = AIManager(camera_id, self.device)
+                time.sleep(max(0, 1 / 15 - (time.monotonic() - started)))
         finally:
             self.net.stop()
 

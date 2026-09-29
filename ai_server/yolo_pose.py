@@ -1,62 +1,55 @@
-"""Shared pose model with independent, conservative per-camera IoU identities."""
+# ai_server/yolo_pose.py
 import numpy as np
 from ultralytics import YOLO
+from typing import Dict
+
 from config.settings import YOLO_POSE_MODEL
 
 
 class YOLOPoseWrapper:
-    def __init__(self, device='cuda'):
+    """YOLO Pose 모델을 래핑하여 frame → keypoints_dict 변환"""
+
+    def __init__(self, device: str = 'cuda'):
         self.model = YOLO(YOLO_POSE_MODEL)
         self.device = device
-        self.tracks = {}
-        self.next_ids = {}
+        self.conf_threshold = 0.5
+        self.last_result = {'keypoints': {}, 'bbox': {}}
 
-    def reset(self, camera_id):
-        self.tracks.pop(camera_id, None)
+    def detect(self, frame: np.ndarray)  -> Dict[str, Dict[int, np.ndarray]]:
+        """
+        영상에서 사람 탐지 + 추적 후 keypoints 추출 (정규화 없음)
 
-    def detect_batch(self, frames):
-        """frames: [(camera_id, BGR frame), ...]; returns aligned pose dictionaries."""
-        if not frames:
-            return []
-        results = self.model.predict([frame for _, frame in frames], imgsz=640,
-                                     conf=0.5, device=self.device, verbose=False)
-        output = []
-        for (camera_id, _), result in zip(frames, results):
-            previous = self.tracks.get(camera_id, {})
-            current = {}
-            poses = {}
-            if result.boxes is not None and result.keypoints is not None:
-                boxes = result.boxes.xyxy.cpu().numpy()
-                points = result.keypoints.xy.cpu().numpy()
-                candidates = []
-                for box, keypoints in zip(boxes, points):
-                    if keypoints.shape != (17, 2):
-                        continue
-                    for track_id, old_box in previous.items():
-                        left = np.maximum(box[:2], old_box[:2])
-                        right = np.minimum(box[2:], old_box[2:])
-                        intersection = np.prod(np.maximum(right - left, 0))
-                        area_a = np.prod(np.maximum(box[2:] - box[:2], 0))
-                        area_b = np.prod(np.maximum(old_box[2:] - old_box[:2], 0))
-                        score = intersection / (area_a + area_b - intersection + 1e-9)
-                        if score >= 0.3:
-                            candidates.append((score, len(poses), track_id))
-                    poses[len(poses)] = (box, keypoints)
-                matches = {}
-                used = set()
-                for _, index, track_id in sorted(candidates, reverse=True):
-                    if index not in matches and track_id not in used:
-                        matches[index] = track_id
-                        used.add(track_id)
-                mapped = {}
-                for index, (box, points) in poses.items():
-                    track_id = matches.get(index)
-                    if track_id is None:
-                        track_id = self.next_ids.get(camera_id, 1)
-                        self.next_ids[camera_id] = track_id + 1
-                    current[track_id] = box
-                    mapped[track_id] = points.astype(np.float32)
-                poses = mapped
-            self.tracks[camera_id] = current
-            output.append(poses)
-        return output
+        Args:
+            frame: BGR 영상 (H, W, 3)
+
+        Returns:
+            {track_id: keypoints} 형식
+            keypoints shape: (17, 2)
+        """
+        results = self.model.track(frame, persist=True, conf=self.conf_threshold,device=self.device, verbose=False)
+        keypoints_dict = {}
+        bbox_dict = {}
+
+        for result in results:
+            if result.boxes is None or result.keypoints is None:
+                continue
+
+            track_ids = result.boxes.id
+            if track_ids is None:
+                continue
+
+            keypoints_array = result.keypoints.xy.cpu().numpy()
+            boxes_array = result.boxes.xyxy.cpu().numpy()  # [x1, y1, x2, y2]
+
+            for track_id, keypoints, bbox in zip(track_ids, keypoints_array, boxes_array):
+                track_id = int(track_id)
+
+                if keypoints.shape == (17, 2):
+                    keypoints_dict[track_id] = keypoints.astype(np.float32)
+                    bbox_dict[track_id] = bbox.tolist()
+
+        self.last_result = {
+            'keypoints': keypoints_dict,
+            'bbox': bbox_dict
+        }
+        return self.last_result

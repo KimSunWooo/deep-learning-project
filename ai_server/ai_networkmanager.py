@@ -1,4 +1,4 @@
-"""Local bidirectional video WebSocket and bounded latest-frame buffers."""
+"""Local JPEG input WebSocket and AIOutput HTTP callback."""
 import asyncio
 import json
 import logging
@@ -39,6 +39,10 @@ class AINetworkManager:
             await socket.close(code=1008, reason='main server already connected')
             return
         self.socket = socket
+        # A restarted main server begins a new frame-id sequence.
+        with self.lock:
+            self.last_ids.clear()
+            self.frames.clear()
         try:
             async for message in socket:
                 try:

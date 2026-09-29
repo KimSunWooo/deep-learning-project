@@ -6,15 +6,12 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODEL_DIR = BASE_DIR / 'ai_server' / 'models'
 
-# Local AI ingress; Main Server forwards timestamped JPEG samples.
+# WebSocket JPEG ingress on loopback; HTTP result callback on loopback.
 CAMERA_IDS = tuple(f'cam_{index:02d}' for index in range(1, 6))
-AI_SERVER_PORT = 9100
-GUI_VIDEO_PORT = 9998
 
-# TCP 포트
-MAIN_SERVICE_HOST = 'localhost'
+AI_SERVER_PORT = 9100
+MAIN_SERVICE_HOST = '127.0.0.1'
 MAIN_SERVICE_PORT = 5000
-GUI_INFO_PORT = 9999
 
 # ============ 모델 경로 ============
 YOLO_POSE_MODEL = str(MODEL_DIR / 'yolov8n-pose.pt')

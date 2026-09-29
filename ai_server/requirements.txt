@@ -1,0 +1,2 @@
+-r ../config/fallDetect_requirements.txt
+websockets>=14,<17

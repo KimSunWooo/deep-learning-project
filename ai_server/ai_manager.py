@@ -1,6 +1,7 @@
 import threading
 
 from .data_models import AIOutput
+from .yolo_pose import YOLOPoseWrapper
 from .fall_detector import FallDetectorSession, load_models as load_fall_model
 from .gait_analyzer import GaitAnalyzerSession, load_models as load_gait_models  
 from .stretching_manager import StretchingManager
@@ -42,6 +43,8 @@ class AIManager:
         # 공유 모델 (전 카메라 공통, 1번만 로드됨)
         models = get_shared_models(self.device)
 
+        # YOLO는 트래커 상태를 가지므로 카메라별로 따로 생성
+        self.yolo_pose = YOLOPoseWrapper(device=self.device)
 
         self.fall_detector = FallDetectorSession(
             camera_id=camera_id,
@@ -69,10 +72,11 @@ class AIManager:
         if mode in [self.MODE_FALL_ONLY, self.MODE_FALL_GAIT, self.MODE_FALL_STRETCH]:
             self.current_mode = mode
     
-    def process_frame(self, frame: np.ndarray, keypoints_dict=None, frame_id=None) -> str:
+    def process_frame(self, frame: np.ndarray) -> str:
         """frame 처리 → JSON 반환"""
-        if keypoints_dict is None:
-            raise ValueError("Pose inference must be supplied by the shared worker")
+        yolo_result = self.yolo_pose.detect(frame)  
+        keypoints_dict = yolo_result['keypoints']
+        bbox_dict = yolo_result['bbox']
 
         # 사람이 없는 프레임도 번호는 증가
         frame_idx = self.frame_idx
@@ -83,21 +87,21 @@ class AIManager:
         if keypoints_dict:
             # 모드별로 하나의 모듈만 실행
             if self.current_mode == self.MODE_FALL_ONLY:
-                detections = self.fall_detector.process_keypoints(frame_idx, keypoints_dict)
+                detections = self.fall_detector.process_keypoints(keypoints_dict, bbox_dict)
 
             elif self.current_mode == self.MODE_FALL_GAIT:
-                detections = self.gait_analyzer.process_keypoints(frame_idx, keypoints_dict)
+                detections = self.gait_analyzer.process_keypoints(keypoints_dict, bbox_dict)
 
             elif self.current_mode == self.MODE_FALL_STRETCH:
-                detections = self.stretching_mgr.process_keypoints(frame_idx, keypoints_dict)
+                detections = self.stretching_mgr.process_keypoints(keypoints_dict, bbox_dict)
 
-        return self._make_output(detections, frame_id)
+        return self._make_output(detections, frame_idx) 
     
-    def _make_output(self, detections: list, frame_id=None) -> str:
+    def _make_output(self, detections: list, frame_idx) -> str:
         output = AIOutput(
             camera_id=self.camera_id,
-            frame_id=frame_id,
             timestamp=datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+            frame_idx = frame_idx,
             mode=self.current_mode,
             detections=detections
         )

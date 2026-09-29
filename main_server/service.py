@@ -17,6 +17,7 @@ from websockets.exceptions import ConnectionClosed
 
 from config.settings import CAMERA_IDS
 from config.frame_protocol import pack_frame
+from main_server.policy import DecisionEngine
 
 LOG = logging.getLogger(__name__)
 AI_URL = os.getenv('AI_VIDEO_URL', 'ws://127.0.0.1:9100/frames')
@@ -132,8 +133,8 @@ class MainServer:
         self.http_server = None
         self.ui_server = None
         self.ui_clients = set()
-        self.fall_candidates = {}
-        self.fall_last_alert = {}
+        self.decisions = DecisionEngine()
+        self.decision_lock = threading.Lock()
 
     async def ui_handler(self, socket):
         if urlparse(socket.request.path).path != '/ui':
@@ -150,28 +151,17 @@ class MainServer:
         if not self.ui_clients:
             return
         await self.broadcast(result)
-        camera_id = result.get('camera_id')
-        if result.get('mode') != 0 or camera_id not in self.cameras:
-            return
-        high = {
-            detection.get('track_id')
-            for detection in result.get('detections', [])
-            if float(detection.get('raw_data', {}).get('fall_prob', 0)) >= 0.9
-        }
-        previous = self.fall_candidates.get(camera_id, {})
-        current = {track_id: previous.get(track_id, 0) + 1 for track_id in high}
-        self.fall_candidates[camera_id] = current
-        for track_id, count in current.items():
-            key = camera_id, track_id
-            if count < 3 or time.monotonic() - self.fall_last_alert.get(key, float('-inf')) < 30:
-                continue
-            self.fall_last_alert[key] = time.monotonic()
-            await self.broadcast({
-                'type': 'event', 'event_id': f'{camera_id}:{track_id}:{result.get("frame_id")}',
-                'camera_id': camera_id, 'severity': 'urgent', 'navigate_to': 'cctv',
-                'content': '낙상 의심: 연속 3회 높은 모델 확률 (임시 기준, 현장 확인 필요)',
-                'occurred_at': result.get('timestamp'),
-            })
+        fall = result.get('judgment', {}).get('fall')
+        if fall:
+            for event in fall['events']:
+                if event['event'].endswith('_TO_ALERT'):
+                    await self.broadcast({
+                        'type': 'event',
+                        'event_id': f"{result['camera_id']}:{event['track_id']}:{result['frame_id']}",
+                        'camera_id': result['camera_id'], 'severity': 'urgent',
+                        'navigate_to': 'cctv', 'content': '낙상 경보: 상태 판단 결과 alert',
+                        'occurred_at': event['timestamp'],
+                    })
 
     async def broadcast(self, payload):
         message = json.dumps(payload)
@@ -312,6 +302,9 @@ class MainServer:
                             if older < frame_id:
                                 del state.pending_frames[older]
                     rendered = render_skeletons(original, result['skeletons'])
+                    with owner.decision_lock:
+                        # AIOutput remains intact; final state is a separate main-server field.
+                        result['judgment'] = owner.decisions.evaluate(result)
                     with state.lock:
                         if frame_id <= state.last_result_id:
                             raise ValueError('stale result')
