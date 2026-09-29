@@ -92,20 +92,24 @@ class DecisionContractTest(unittest.TestCase):
                 def start(self):
                     pass
 
-                def take_latest(self):
-                    return {'cam_01': (123, __import__('time').time(), 1,
-                                       np.zeros((10, 10, 3), np.uint8))}
+                def get_frame(self, camera_id):
+                    self.assert_camera = camera_id
+                    return {'frame_id': 123, 'mode': 1,
+                            'frame': np.zeros((10, 10, 3), np.uint8)}
 
                 def send_to_main(self, payload):
                     self.result = json.loads(payload)
-                    service.running = False
+                    raise SystemExit
 
                 def stop(self):
                     pass
 
             network = Network()
             service.net = network
-            service.run()
+            service.ai_managers['cam_01'] = Model('cam_01', 'cpu')
+            with self.assertRaises(SystemExit):
+                service._process_camera('cam_01')
+            self.assertEqual(network.assert_camera, 'cam_01')
             for name, value in original.items():
                 self.assertEqual(network.result[name], value)
             self.assertEqual(network.result['frame_id'], 123)

@@ -2,6 +2,8 @@
 
 이 통합본은 `deeplearning-repo-main.zip`의 모델 가중치, `fall_detector.py`, `gait_analyzer.py`, `stretching_manager.py`, `ai_manager.py`, `data_models.py`, `main_service/fall_analyzer.py`, `main_service/stretching_analyzer.py` 파일을 바꾸지 않고 사용합니다. `yolo_pose.py`는 기존 `detect()` 출력 그대로 유지하면서 마지막 관절 좌표를 통신 계층이 읽을 수 있게 보관하는 코드만 추가했습니다. `ai_service.py`, `ai_networkmanager.py`, `main_server/`, `config/settings.py`는 WebSocket·HTTP 계약에 맞춰 연결했습니다.
 
+AI 서비스는 원본처럼 **카메라별 스레드와 AIManager 인스턴스 하나씩**을 유지합니다. 각 스레드에서 `get_frame(camera_id) → set_mode(mode) → process_frame(frame) → send_to_main(result)`를 순서대로 호출합니다. 통신용 프레임 보관만 카메라별 최신 1개로 제한하며, 지연 프레임·모드 변경·처리 오류에 따라 AIManager를 다시 만들지 않습니다. 영상이 밀리면 중간 프레임이 생략될 수 있으므로 원본 시간 모델의 입력 간격은 실제 영상으로 검증해야 합니다.
+
 ## 역할과 통신
 
 ```mermaid

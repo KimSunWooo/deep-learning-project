@@ -1,53 +1,53 @@
-"""WebSocket video ingress with the unchanged main-version model outputs."""
+"""Run the original per-camera AIManager flow over WebSocket/HTTP transport."""
 import json
 import logging
+import threading
 import time
 
 from config.settings import CAMERA_IDS
 from .ai_manager import AIManager
 from .ai_networkmanager import AINetworkManager
 
-LOG = logging.getLogger(__name__)
-
 
 class AIService:
     def __init__(self, device='cuda'):
-        self.device = device
         self.net = AINetworkManager()
-        self.running = False
+        self.ai_managers = {}
+        self.device = device
+        self.logger = logging.getLogger('AIService')
 
     def run(self):
-        managers = {camera_id: AIManager(camera_id, self.device) for camera_id in CAMERA_IDS}
         self.net.start()
-        self.running = True
-        try:
-            while self.running:
-                started = time.monotonic()
-                for camera_id, (frame_id, capture_time, mode, frame) in self.net.take_latest().items():
-                    if time.time() - capture_time > 0.5:
-                        managers[camera_id] = AIManager(camera_id, self.device)
-                        continue
-                    try:
-                        manager = managers[camera_id]
-                        if manager.current_mode != mode:
-                            managers[camera_id] = manager = AIManager(camera_id, self.device)
-                        manager.set_mode(mode)
-                        # Main-version AIManager and RawDetection retain their outputs.
-                        result = json.loads(manager.process_frame(frame))
-                        pose = manager.yolo_pose.last_result
-                        # Transport metadata only: retain frame_idx, detections, raw_data as-is.
-                        result['frame_id'] = frame_id
-                        result['skeletons'] = [
-                            {'track_id': int(track_id), 'keypoints': points.tolist()}
-                            for track_id, points in pose['keypoints'].items()
-                        ]
-                        self.net.send_to_main(json.dumps(result, ensure_ascii=False))
-                    except Exception:
-                        LOG.exception('Inference failed for %s', camera_id)
-                        managers[camera_id] = AIManager(camera_id, self.device)
-                time.sleep(max(0, 1 / 15 - (time.monotonic() - started)))
-        finally:
-            self.net.stop()
+        self.logger.info('AIService started on WebSocket port 9100')
+        for camera_id in CAMERA_IDS:
+            ai_mgr = AIManager(camera_id=camera_id, device=self.device)
+            self.ai_managers[camera_id] = ai_mgr
+            threading.Thread(target=self._process_camera, args=(camera_id,),
+                             daemon=True).start()
+            self.logger.info('Started thread for %s', camera_id)
+        while True:
+            threading.Event().wait(1)
+
+    def _process_camera(self, camera_id: str):
+        """Preserve main's set_mode -> process_frame -> send result sequence."""
+        ai_mgr = self.ai_managers[camera_id]
+        while True:
+            try:
+                payload = self.net.get_frame(camera_id)
+                ai_mgr.set_mode(payload['mode'])
+                json_result = ai_mgr.process_frame(payload['frame'])
+
+                # Metadata identifies the JPEG held by main; preserve AIOutput fields.
+                result = json.loads(json_result)
+                result['frame_id'] = payload['frame_id']
+                result['skeletons'] = [
+                    {'track_id': int(track_id), 'keypoints': points.tolist()}
+                    for track_id, points in ai_mgr.yolo_pose.last_result['keypoints'].items()
+                ]
+                self.net.send_to_main(json.dumps(result, ensure_ascii=False))
+            except Exception:
+                self.logger.exception('[%s] Error', camera_id)
+                time.sleep(0.1)
 
 
 if __name__ == '__main__':

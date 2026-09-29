@@ -24,6 +24,7 @@ class AINetworkManager:
         self.frames = {}
         self.last_ids = {}
         self.lock = threading.Lock()
+        self.frame_ready = threading.Condition(self.lock)
         self.thread = None
         self.loop = None
         self.socket = None
@@ -40,7 +41,7 @@ class AINetworkManager:
             return
         self.socket = socket
         # A restarted main server begins a new frame-id sequence.
-        with self.lock:
+        with self.frame_ready:
             self.last_ids.clear()
             self.frames.clear()
         try:
@@ -58,11 +59,12 @@ class AINetworkManager:
                     image = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
                     if image is None:
                         raise ValueError('invalid JPEG')
-                    with self.lock:
+                    with self.frame_ready:
                         if frame_id <= self.last_ids.get(camera_id, -1):
                             continue
                         self.last_ids[camera_id] = frame_id
                         self.frames[camera_id] = (frame_id, timestamp, mode, image)
+                        self.frame_ready.notify_all()
                 except (ValueError, KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
                     self.logger.warning('Dropped invalid AI input frame')
         except ConnectionClosed:
@@ -98,6 +100,15 @@ class AINetworkManager:
             frames = self.frames
             self.frames = {}
         return frames
+
+    def get_frame(self, camera_id):
+        """Wait for this camera's newest frame; keep other cameras independent."""
+        with self.frame_ready:
+            while camera_id not in self.frames:
+                self.frame_ready.wait()
+            frame_id, capture_time, mode, frame = self.frames.pop(camera_id)
+        return {'frame_id': frame_id, 'capture_time': capture_time,
+                'mode': mode, 'frame': frame}
 
     def send_to_main(self, result):
         try:
